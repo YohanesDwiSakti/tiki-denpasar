@@ -11,7 +11,7 @@ use Illuminate\Session\SessionServiceProvider;
 use Illuminate\Translation\TranslationServiceProvider;
 use Illuminate\View\ViewServiceProvider;
 
-return Application::configure(basePath: dirname(__DIR__))
+$app = Application::configure(basePath: dirname(__DIR__))
     ->withProviders([
         CookieServiceProvider::class,
         FilesystemServiceProvider::class,
@@ -38,3 +38,15 @@ return Application::configure(basePath: dirname(__DIR__))
         });
     })
     ->create();
+
+foreach ([
+    CookieServiceProvider::class,
+    FilesystemServiceProvider::class,
+    SessionServiceProvider::class,
+    TranslationServiceProvider::class,
+    ViewServiceProvider::class,
+] as $provider) {
+    $app->register($provider);
+}
+
+return $app;

@@ -1,0 +1,459 @@
+<?php
+
+use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\URL;
+use Illuminate\Http\Request;
+use App\Support\SupabaseGateway;
+
+if (app()->environment('production')) {
+    URL::forceScheme('https');
+}
+
+function guardRole(string $role)
+{
+    if (session('auth_role') === $role) {
+        return null;
+    }
+
+    return redirect()
+        ->route('login', ['redirect' => request()->path()])
+        ->with('auth_notice', 'Silakan login dulu untuk membuka halaman tersebut.');
+}
+
+Route::get('/language/{locale}', function (string $locale) {
+    abort_unless(in_array($locale, ['id', 'en'], true), 404);
+
+    session(['locale' => $locale]);
+
+    return redirect()->back();
+})->name('language.switch');
+
+$locations = [
+    [
+        'name' => 'TIKI Cabang Denpasar',
+        'type' => 'Hub Cabang',
+        'address' => 'Jl. Kapten Regug No. 1, Denpasar, Bali 80232',
+        'hours' => 'Senin-Jumat 08.00-18.00, Sabtu 08.00-16.00, Minggu 10.00-15.00',
+        'phone' => '(0361) 223049 / 223977',
+        'services' => ['Drop paket', 'Ambil paket', 'Bantuan resi'],
+        'maps_url' => 'https://www.google.com/maps/search/?api=1&query=TIKI+Denpasar+Jl+Kapten+Regug+No+1',
+    ],
+    [
+        'name' => 'TIKI Denpasar Gatot Subroto',
+        'type' => 'Gerai',
+        'address' => 'Jl. Gatot Subroto Barat No. 293A, Denpasar',
+        'hours' => 'Senin-Jumat 08.00-20.30, Sabtu 08.00-19.00',
+        'phone' => 'Kontak gerai',
+        'services' => ['Drop paket', 'Estimasi ongkir'],
+        'maps_url' => 'https://www.google.com/maps/search/?api=1&query=TIKI+Gatot+Subroto+Barat+293A+Denpasar',
+    ],
+    [
+        'name' => 'TIKI Ahmad Yani Utara',
+        'type' => 'Agen',
+        'address' => 'Jl. Ahmad Yani Utara No. 165, Denpasar',
+        'hours' => 'Ikuti jam operasional gerai',
+        'phone' => '(0361) 7422448',
+        'services' => ['Drop paket', 'Bantuan pengiriman'],
+        'maps_url' => 'https://www.google.com/maps/search/?api=1&query=TIKI+Ahmad+Yani+Utara+165+Denpasar',
+    ],
+    [
+        'name' => 'TIKI Nangka',
+        'type' => 'Agen',
+        'address' => 'Jl. Nangka No. 120, Denpasar',
+        'hours' => 'Ikuti jam operasional gerai',
+        'phone' => '(0361) 8853416',
+        'services' => ['Drop paket', 'Bantuan pengiriman'],
+        'maps_url' => 'https://www.google.com/maps/search/?api=1&query=TIKI+Nangka+120+Denpasar',
+    ],
+    [
+        'name' => 'TIKI Kerobokan',
+        'type' => 'Agen Sekitar Denpasar',
+        'address' => 'Jl. Raya Kerobokan No. 59X, Kerobokan',
+        'hours' => 'Ikuti jam operasional gerai',
+        'phone' => '(0361) 9187077',
+        'services' => ['Drop paket', 'Rute Badung utara'],
+        'maps_url' => 'https://www.google.com/maps/search/?api=1&query=TIKI+Raya+Kerobokan+59X',
+    ],
+];
+
+function serviceAreaRate(string $destination): int
+{
+    $normalized = strtolower($destination);
+
+    if (str_contains($normalized, 'denpasar')) {
+        return 7000;
+    }
+
+    if (str_contains($normalized, 'badung') || str_contains($normalized, 'kerobokan') || str_contains($normalized, 'canggu') || str_contains($normalized, 'kuta')) {
+        return 9000;
+    }
+
+    if (str_contains($normalized, 'gianyar') || str_contains($normalized, 'ubud')) {
+        return 11000;
+    }
+
+    if (str_contains($normalized, 'tabanan')) {
+        return 12000;
+    }
+
+    if (str_contains($normalized, 'klungkung') || str_contains($normalized, 'bangli')) {
+        return 14000;
+    }
+
+    if (str_contains($normalized, 'buleleng') || str_contains($normalized, 'singaraja') || str_contains($normalized, 'karangasem') || str_contains($normalized, 'jembrana')) {
+        return 18000;
+    }
+
+    return 15000;
+}
+
+function shippingEstimates(string $origin, string $destination, int $chargeableWeight): array
+{
+    if (trim($origin) === '' || trim($destination) === '' || $chargeableWeight < 1) {
+        return [];
+    }
+
+    $base = serviceAreaRate($destination);
+    $routeSurcharge = str_contains(strtolower($origin), 'denpasar') ? 0 : 3000;
+
+    return [
+        [
+            'service' => 'REG',
+            'label' => 'Regular',
+            'eta' => '1-2 hari kerja',
+            'multiplier' => 1,
+            'price' => max(10000, ($base + $routeSurcharge) * $chargeableWeight),
+        ],
+        [
+            'service' => 'ONS',
+            'label' => 'Over Night Service',
+            'eta' => 'hari kerja berikutnya',
+            'multiplier' => 1.65,
+            'price' => max(18000, (int) ceil(($base + $routeSurcharge) * 1.65 * $chargeableWeight)),
+        ],
+        [
+            'service' => 'ECO',
+            'label' => 'Economy',
+            'eta' => '3-5 hari kerja',
+            'multiplier' => 0.82,
+            'price' => max(8000, (int) ceil(($base + $routeSurcharge) * 0.82 * $chargeableWeight)),
+        ],
+    ];
+}
+
+Route::get('/', function (SupabaseGateway $supabase) {
+    $receipt = request('receipt', '');
+    $selected = $receipt !== '' ? $supabase->packageByReceipt($receipt) : null;
+
+    return view('home', [
+        'receipt' => $receipt,
+        'selected' => $selected,
+        'packages' => [],
+    ]);
+})->name('home');
+
+Route::get('/tracking', function () use ($locations) {
+    $receipt = request('receipt');
+    $activeTab = request('tab', 'resi');
+    if (! in_array($activeTab, ['resi', 'harga', 'lokasi'], true)) {
+        $activeTab = 'resi';
+    }
+    $selected = null;
+
+    if ($activeTab === 'resi' && $receipt) {
+        try {
+            $selected = app(SupabaseGateway::class)->packageByReceipt($receipt);
+        } catch (\Throwable) {
+            $selected = null;
+        }
+    }
+
+    $origin = request('origin', '');
+    $destination = request('destination', '');
+    $weight = max((float) request('weight', 0), 0);
+    $length = max((float) request('length', 0), 0);
+    $width = max((float) request('width', 0), 0);
+    $height = max((float) request('height', 0), 0);
+    $volumeWeight = $length > 0 && $width > 0 && $height > 0 ? ceil(($length * $width * $height) / 6000) : 0;
+    $chargeableWeight = (int) ceil(max($weight, $volumeWeight));
+    $rates = shippingEstimates($origin, $destination, $chargeableWeight);
+    $baseRate = serviceAreaRate($destination);
+    $routeSurcharge = str_contains(strtolower($origin), 'denpasar') ? 0 : 3000;
+    $ratePerKg = $baseRate + $routeSurcharge;
+    $calculation = count($rates) > 0 ? [
+        'actual_weight' => $weight,
+        'length' => $length,
+        'width' => $width,
+        'height' => $height,
+        'volume_weight' => $volumeWeight,
+        'chargeable_weight' => $chargeableWeight,
+        'base_rate' => $baseRate,
+        'route_surcharge' => $routeSurcharge,
+        'rate_per_kg' => $ratePerKg,
+    ] : null;
+
+    $locationQuery = strtolower(trim(request('q', '')));
+    $filteredLocations = $locationQuery === ''
+        ? $locations
+        : array_filter($locations, fn (array $location): bool =>
+            str_contains(strtolower($location['name']), $locationQuery)
+            || str_contains(strtolower($location['address']), $locationQuery)
+            || str_contains(strtolower($location['type']), $locationQuery)
+        );
+
+    return view('tracking', [
+        'receipt' => $receipt,
+        'selected' => $selected,
+        'packages' => [],
+        'activeTab' => $activeTab,
+        'origin' => $origin,
+        'destination' => $destination,
+        'weight' => request('weight', ''),
+        'length' => request('length', ''),
+        'width' => request('width', ''),
+        'height' => request('height', ''),
+        'chargeableWeight' => $chargeableWeight,
+        'volumeWeight' => $volumeWeight,
+        'calculation' => $calculation,
+        'rates' => $rates,
+        'query' => request('q', ''),
+        'locations' => $filteredLocations,
+    ]);
+})->name('tracking');
+
+Route::get('/cek-ongkir', function () {
+    return redirect(route('tracking', array_merge(request()->query(), ['tab' => 'harga'])));
+})->name('shipping');
+
+Route::get('/lokasi', function () {
+    return redirect(route('tracking', array_merge(request()->query(), ['tab' => 'lokasi'])));
+})->name('locations');
+
+Route::get('/cek-lokasi', function () {
+    return redirect(route('tracking', array_merge(request()->query(), ['tab' => 'lokasi'])));
+});
+
+Route::get('/support', fn () => view('support'))->name('support');
+
+Route::get('/about', fn () => view('about'))->name('about');
+
+Route::get('/login', fn () => view('login'))->name('login');
+
+Route::post('/login', function (Request $request, SupabaseGateway $supabase) {
+    $data = $request->validate([
+        'email' => ['required', 'email'],
+        'password' => ['required', 'string'],
+        'role' => ['required', 'in:admin,driver'],
+        'redirect' => ['nullable', 'string'],
+    ]);
+
+    try {
+        $login = $supabase->login($data['email'], $data['password'], $data['role']);
+    } catch (\Throwable) {
+        return back()->withErrors(['email' => __('messages.login.error')])->withInput($request->except('password'));
+    }
+
+    session()->regenerate();
+    session([
+        'auth_id' => $login['profile']['id'],
+        'auth_role' => $login['profile']['role'],
+        'auth_email' => $login['profile']['email'],
+        'auth_name' => $login['profile']['name'],
+        'auth_token' => $login['access_token'],
+    ]);
+
+    $redirect = trim($data['redirect'] ?? '', '/');
+    if ($redirect !== '' && str_starts_with($redirect, $data['role'])) {
+        return redirect('/' . $redirect);
+    }
+
+    return redirect()->route($data['role'] === 'admin' ? 'admin.dashboard' : 'driver.index');
+})->name('login.submit');
+
+Route::match(['GET', 'POST'], '/logout', function () {
+    session()->forget(['auth_id', 'auth_role', 'auth_email', 'auth_name', 'auth_token']);
+    session()->invalidate();
+    session()->regenerateToken();
+
+    return redirect()->route('login')->with('auth_notice', 'Anda sudah logout.');
+})->name('logout');
+
+Route::get('/admin', function (SupabaseGateway $supabase) {
+    if ($redirect = guardRole('admin')) {
+        return $redirect;
+    }
+
+    return view('admin.dashboard', [
+        'packages' => $supabase->packages(),
+        'drivers' => $supabase->drivers(),
+    ]);
+})->name('admin.dashboard');
+
+Route::get('/admin/packages', function (SupabaseGateway $supabase) {
+    if ($redirect = guardRole('admin')) {
+        return $redirect;
+    }
+
+    return view('admin.packages', ['packages' => $supabase->packages()]);
+})->name('admin.packages');
+
+Route::post('/admin/packages', function (Request $request, SupabaseGateway $supabase) {
+    if ($redirect = guardRole('admin')) {
+        return $redirect;
+    }
+
+    $data = $request->validate([
+        'receipt' => ['required', 'string', 'max:80'],
+        'status' => ['required', 'in:Terdaftar,Diangkut Driver,Dalam Perjalanan,Sampai Tujuan,Gagal Dikirim,Cancel'],
+        'destination' => ['required', 'string', 'max:160'],
+        'latest_location' => ['required', 'string', 'max:160'],
+        'note' => ['nullable', 'string', 'max:500'],
+    ]);
+
+    try {
+        $supabase->savePackage($data, session('auth_id'));
+    } catch (\Throwable $error) {
+        return back()->withErrors(['receipt' => $error->getMessage()])->withInput();
+    }
+
+    return redirect()->route('admin.packages')->with('status', 'Paket berhasil disimpan.');
+})->name('admin.packages.store');
+
+Route::get('/admin/assignments', function (SupabaseGateway $supabase) {
+    if ($redirect = guardRole('admin')) {
+        return $redirect;
+    }
+
+    return view('admin.assignments', [
+        'packages' => $supabase->packages(),
+        'drivers' => $supabase->drivers(),
+    ]);
+})->name('admin.assignments');
+
+Route::post('/admin/assignments', function (Request $request, SupabaseGateway $supabase) {
+    if ($redirect = guardRole('admin')) {
+        return $redirect;
+    }
+
+    $receipts = collect($request->input('receipts', []))
+        ->push($request->input('manual_receipt'))
+        ->filter(fn ($receipt): bool => trim((string) $receipt) !== '')
+        ->map(fn ($receipt): string => strtoupper(trim((string) $receipt)))
+        ->unique()
+        ->values()
+        ->all();
+
+    $request->merge(['receipts' => $receipts]);
+
+    $data = $request->validate([
+        'driver_id' => ['required', 'string'],
+        'receipts' => ['required', 'array', 'min:1'],
+        'receipts.*' => ['required', 'string'],
+        'manual_receipt' => ['nullable', 'string'],
+        'note' => ['nullable', 'string', 'max:500'],
+    ]);
+
+    try {
+        $supabase->assignPackages($data['receipts'], $data['driver_id'], session('auth_id'), $data['note'] ?? null);
+    } catch (\Throwable $error) {
+        return back()->withErrors(['driver_id' => $error->getMessage()])->withInput();
+    }
+
+    return redirect()->route('admin.assignments')->with('status', 'Paket berhasil diassign ke driver.');
+})->name('admin.assignments.store');
+
+Route::get('/admin/proofs', function (SupabaseGateway $supabase) {
+    if ($redirect = guardRole('admin')) {
+        return $redirect;
+    }
+
+    return view('admin.proofs', [
+        'packages' => array_filter($supabase->packages(), fn (array $package): bool => $package['proof'] !== null),
+    ]);
+})->name('admin.proofs');
+
+Route::get('/driver', function (SupabaseGateway $supabase) {
+    if ($redirect = guardRole('driver')) {
+        return $redirect;
+    }
+
+    return view('driver.index', [
+        'packages' => $supabase->driverPackages(session('auth_id')),
+    ]);
+})->name('driver.index');
+
+Route::get('/driver/proof', function () {
+    if ($redirect = guardRole('driver')) {
+        return $redirect;
+    }
+
+    return redirect()->route('driver.index');
+});
+
+Route::get('/driver/proof/{receipt}', function (string $receipt, SupabaseGateway $supabase) {
+    if ($redirect = guardRole('driver')) {
+        return $redirect;
+    }
+
+    $package = collect($supabase->driverPackages(session('auth_id')))->firstWhere('receipt', strtoupper($receipt));
+
+    abort_if(! $package, 404);
+
+    return view('driver.proof', ['package' => $package]);
+})->name('driver.proof');
+
+Route::post('/driver/proof', function (Request $request, SupabaseGateway $supabase) {
+    if ($redirect = guardRole('driver')) {
+        return $redirect;
+    }
+
+    $data = $request->validate([
+        'receipt' => ['required', 'string'],
+        'photo' => ['required', 'image', 'max:10240'],
+        'delivered_at' => ['required', 'date'],
+        'delivered_location' => ['required', 'string', 'max:160'],
+        'latitude' => ['nullable', 'numeric'],
+        'longitude' => ['nullable', 'numeric'],
+        'note' => ['nullable', 'string', 'max:500'],
+    ]);
+
+    try {
+        $supabase->submitProof($data['receipt'], session('auth_id'), $data + ['photo_url' => ''], $request->file('photo'));
+    } catch (\Throwable $error) {
+        return redirect()
+            ->route('driver.proof', ['receipt' => $data['receipt']])
+            ->withErrors(['photo' => $error->getMessage()])
+            ->withInput();
+    }
+
+    return redirect()->route('driver.index')->with('status', 'Bukti berhasil dikirim.');
+})->name('driver.proof.store');
+
+Route::post('/driver/proof/{receipt}', function (string $receipt, Request $request, SupabaseGateway $supabase) {
+    if ($redirect = guardRole('driver')) {
+        return $redirect;
+    }
+
+    $request->merge(['receipt' => $receipt]);
+
+    $data = $request->validate([
+        'receipt' => ['required', 'string'],
+        'photo' => ['required', 'image', 'max:10240'],
+        'delivered_at' => ['required', 'date'],
+        'delivered_location' => ['required', 'string', 'max:160'],
+        'latitude' => ['nullable', 'numeric'],
+        'longitude' => ['nullable', 'numeric'],
+        'note' => ['nullable', 'string', 'max:500'],
+    ]);
+
+    try {
+        $supabase->submitProof($data['receipt'], session('auth_id'), $data + ['photo_url' => ''], $request->file('photo'));
+    } catch (\Throwable $error) {
+        return redirect()
+            ->route('driver.proof', ['receipt' => $data['receipt']])
+            ->withErrors(['photo' => $error->getMessage()])
+            ->withInput();
+    }
+
+    return redirect()->route('driver.index')->with('status', 'Bukti berhasil dikirim.');
+});

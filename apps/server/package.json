@@ -1,0 +1,15 @@
+{
+  "name": "@repo/server",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "set GOCACHE=%CD%\\..\\..\\.cache\\go-build&& go run ./cmd/api",
+    "build": "set GOCACHE=%CD%\\..\\..\\.cache\\go-build&& go build -o finproppt-api.exe ./cmd/api",
+    "start": "set GOCACHE=%CD%\\..\\..\\.cache\\go-build&& go run ./cmd/api",
+    "lint": "set GOCACHE=%CD%\\..\\..\\.cache\\go-build&& go vet ./...",
+    "typecheck": "set GOCACHE=%CD%\\..\\..\\.cache\\go-build&& go test ./...",
+    "test": "set GOCACHE=%CD%\\..\\..\\.cache\\go-build&& go test ./..."
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
